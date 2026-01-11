@@ -1,160 +1,223 @@
 import telebot
 from telebot import types
 import time
+import json
+import os
 
-# --- CONFIGURATION ---
-API_ID = 19703932
-API_HASH = "2fe31e84e0b537b505f528e62e114664"
-BOT_TOKEN = "7292122932:AAG8hCvjbcF-MuM9IUxivPUGyF-MvdW84HQ"
+# ================= CONFIG =================
+BOT_TOKEN = "7292122932:AAG8hCvjbcF-MuM9IUxivPUGyF-MvdW84HQ"   # BotFather token ထည့်
 OWNER_ID = 1735522859
 MAIN_GROUP = -1002849045181
 BACKUP_GROUP = -1003502685671
 
 bot = telebot.TeleBot(BOT_TOKEN)
-# DATABASE (ယာယီမှတ်ဉာဏ် - Bot ပိတ်ရင် ပျက်ပါမယ်။ အတည်သိမ်းချင်ရင် Firestore သုံးရပါမယ်)
-db = {
-    "users": {}, 
-    "movies": {}, # Movie ID နဲ့ သိမ်းမယ်
-    "current_upload": {} # Admin တစ်ယောက်ချင်းစီရဲ့ Upload process ကို မှတ်ဖို့
-}
 
-# --- FUNCTIONS ---
-# --- MOVIE ADD FLOW ---
+# ================= JSON DATABASE =================
+DB_FILE = "database.json"
 
-@bot.callback_query_handler(func=lambda call: call.data == "add_movie")
-def start_add_movie(call):
-    uid = call.message.chat.id
-    db["current_upload"][uid] = {} # Process စတင်မယ်
-    msg = bot.send_message(uid, "🎬 Movie နာမည်ကို ရိုက်ထည့်ပေးပါ (ဥပမာ - John Wick)")
-    bot.register_next_step_handler(msg, get_movie_title)
-
-def get_movie_title(message):
-    uid = message.chat.id
-    db["current_upload"][uid]['title'] = message.text
-    msg = bot.send_message(uid, "📝 Movie ရဲ့ Description ကို ရိုက်ပေးပါ (ဥပမာ - Action / 2024)")
-    bot.register_next_step_handler(msg, get_movie_desc)
-
-def get_movie_desc(message):
-    uid = message.chat.id
-    db["current_upload"][uid]['desc'] = message.text
-    msg = bot.send_message(uid, "🖼 Movie Cover Photo (ပုံ) ကို ပို့ပေးပါ")
-    bot.register_next_step_handler(msg, get_movie_cover)
-
-def get_movie_cover(message):
-    uid = message.chat.id
-    if message.content_type == 'photo':
-        db["current_upload"][uid]['cover'] = message.photo[-1].file_id
-        msg = bot.send_message(uid, "📹 အခု Movie Video ဖိုင်ကို ပို့ပေးပါ။ အပိုင်းလိုက်ဆိုရင် တစ်ခုချင်းစီ ပို့ပေးပါ (ပြီးရင် /done လို့ ရိုက်ပါ)")
-        db["current_upload"][uid]['parts'] = []
-        bot.register_next_step_handler(msg, get_movie_videos)
-    else:
-        bot.send_message(uid, "⚠️ ဓာတ်ပုံပဲ ပို့ပေးပါဗျာ။ ပြန်ပို့ကြည့်ပါ။")
-        bot.register_next_step_handler(message, get_movie_cover)
-
-def get_movie_videos(message):
-    uid = message.chat.id
-    if message.text == "/done":
-        save_movie_to_db(uid)
-        return
-    
-    if message.content_type in ['video', 'document']:
-        # MAIN GROUP ဆီကို Forward (ပို့) လိုက်ခြင်း
-        sent_msg = bot.forward_message(MAIN_GROUP, uid, message.message_id)
-        # Group ထဲက message_id ကို သိမ်းထားခြင်း
-        db["current_upload"][uid]['parts'].append(sent_msg.message_id)
-        bot.send_message(uid, f"✅ အပိုင်း {len(db['current_upload'][uid]['parts'])} ရရှိပါပြီ။ နောက်ထပ်အပိုင်း ပို့ပါ (သို့မဟုတ် /done ရိုက်ပါ)")
-    
-    bot.register_next_step_handler(message, get_movie_videos)
-
-def save_movie_to_db(uid):
-    movie_id = f"MOV_{int(time.time())}"
-    data = db["current_upload"][uid]
-    
-    db["movies"][movie_id] = {
-        "title": data['title'],
-        "desc": data['desc'],
-        "cover": data['cover'],
-        "parts": data['parts'],
-        "status": "Ended"
+def load_db():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "users": {},
+        "movies": {},
+        "current_upload": {}
     }
-    bot.send_message(uid, f"🎊 '{data['title']}' ကို အောင်မြင်စွာ တင်ပြီးပါပြီ။\nMovie ID: {movie_id}")
-    del db["current_upload"][uid] # Clean up
+
+def save_db():
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
+
+db = load_db()
+# ================= FORCE JOIN CHECK =================
+FORCE_CHANNEL = "osamu1123"  # @ မထည့်
 
 def check_join(user_id):
-    # ဒီနေရာမှာ Force Join စစ်ဆေးဖို့အတွက် ကိုယ့် Channel Username ထည့်ရပါမယ်
-    return True 
+    try:
+        member = bot.get_chat_member(f"@{FORCE_CHANNEL}", user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except:
+        return False
 
-# --- USER COMMANDS ---
-@bot.message_handler(commands=['start'])
-def start(message):
-    uid = message.chat.id
-    if uid not in db["users"]:
-        db["users"][uid] = {"approved": False, "points": 10, "is_vip": False, "watch_count": 0}
-    
-    user = db["users"][uid]
-    if not user["approved"] and uid != OWNER_ID:
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔔 Join Channel", url="https://t.me/osamu1123"))
-        markup.add(types.InlineKeyboardButton("✅ Done", callback_data="check_join"))
-        bot.send_message(uid, "🚫 Access Restricted\nJoin our official channel first 👇", reply_markup=markup)
-    else:
-        main_menu(uid)
-        @bot.message_handler(func=lambda m: m.text == "🎥 Movies")
-def show_movie_list(message):
-    if not db["movies"]:
-        bot.send_message(message.chat.id, "လောလောဆယ် Movie မရှိသေးပါဘူးခင်ဗျာ။")
-        return
-    
-    for m_id, m in db["movies"].items():
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("📺 Watch Now", callback_data=f"watch_{m_id}"))
-        bot.send_photo(message.chat.id, m['cover'], caption=f"🎬 {m['title']}\n📝 {m['desc']}", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("watch_"))
-def watch_movie(call):
-    m_id = call.data.replace("watch_", "")
-    movie = db["movies"].get(m_id)
-    
-    if movie:
-        bot.send_message(call.message.chat.id, f"🎬 {movie['title']} ကို ပို့ပေးနေပါပြီ။ ခဏစောင့်ပါ...")
-        for part_id in movie['parts']:
-            # Group ထဲက Video ကို User ဆီ Forward ပြန်လုပ်ပေးခြင်း
-            bot.forward_message(call.message.chat.id, MAIN_GROUP, part_id)
-            time.sleep(2) # Cooldown 2 sec
-        
-        bot.send_message(call.message.chat.id, "✅ ပို့လို့ပြီးပါပြီ။ ဇာတ်လမ်းဆုံးရင် မူပိုင်ခွင့်အရ ၅ မိနစ်အတွင်း ပြန်ဖျက်ပေးပါမယ်။")
-
-
+# ================= MAIN MENU =================
 def main_menu(uid):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("🎥 Movies", "🔍 Search", "⭐ My Points", "💎 VIP Upgrade", "🔗 My Link", "ℹ️ Help", "❌ Exit")
-    if uid == OWNER_ID:
-        markup.add("⚙️ Owner Dashboard")
-    bot.send_message(uid, "🏠 Main Menu", reply_markup=markup)
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    kb.add("🎥 Movies", "🔍 Search")
+    kb.add("⭐ My Points", "💎 VIP")
+    if str(uid) == str(OWNER_ID):
+        kb.add("➕ Add Movie", "📢 Broadcast")
+    bot.send_message(uid, "🏠 Main Menu", reply_markup=kb)
 
-# --- OWNER DASHBOARD ---
-@bot.message_handler(func=lambda m: m.text == "⚙️ Owner Dashboard")
-def admin_panel(message):
-    if message.chat.id != OWNER_ID: return
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👥 Users", callback_data="manage_users"),
-        types.InlineKeyboardButton("🎬 Manage Movies", callback_data="manage_movies"),
-        types.InlineKeyboardButton("📢 Broadcast", callback_data="broadcast"),
-        types.InlineKeyboardButton("🔐 Force Join", callback_data="force_join")
-    )
-    bot.send_message(OWNER_ID, "🛠 Owner Control Panel", reply_markup=markup)
+# ================= START =================
+@bot.message_handler(commands=["start"])
+def start(message):
+    uid = str(message.chat.id)
 
-# --- CALLBACK HANDLERS ---
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    uid = call.message.chat.id
-    if call.data == "check_join":
-        bot.answer_callback_query(call.id, "Checking...")
-        # စစ်ဆေးပြီးရင် Approved လုပ်ပေးခြင်း (Example)
-        db["users"][uid]["approved"] = True
-        main_menu(uid)
-    elif call.data == "manage_movies":
-        bot.send_message(uid, "1. Tap ➕ Add Movie\n2. Enter Title...")
+    if uid not in db["users"]:
+        db["users"][uid] = {
+            "approved": False,
+            "points": 10,
+            "vip": False
+        }
+        save_db()
 
+    if not check_join(message.chat.id):
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔔 Join Channel", url=f"https://t.me/{FORCE_CHANNEL}"))
+        kb.add(types.InlineKeyboardButton("✅ Done", callback_data="check_join"))
+        bot.send_message(message.chat.id, "🚫 Channel Join လုပ်ပါ", reply_markup=kb)
+        return
+
+    db["users"][uid]["approved"] = True
+    save_db()
+    main_menu(message.chat.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "check_join")
+def recheck(call):
+    if check_join(call.message.chat.id):
+        db["users"][str(call.message.chat.id)]["approved"] = True
+        save_db()
+        main_menu(call.message.chat.id)
+    else:
+        bot.answer_callback_query(call.id, "Join မလုပ်သေးပါ")
+        # ================= ADD MOVIE FLOW =================
+@bot.message_handler(func=lambda m: m.text == "➕ Add Movie" and m.chat.id == OWNER_ID)
+def add_movie(message):
+    uid = str(message.chat.id)
+    db["current_upload"][uid] = {}
+    save_db()
+    msg = bot.send_message(uid, "🎬 Movie နာမည် ရိုက်ထည့်ပါ")
+    bot.register_next_step_handler(msg, get_title)
+
+def get_title(message):
+    uid = str(message.chat.id)
+    db["current_upload"][uid]["title"] = message.text
+    save_db()
+    msg = bot.send_message(uid, "📝 Description ရိုက်ပါ")
+    bot.register_next_step_handler(msg, get_desc)
+
+def get_desc(message):
+    uid = str(message.chat.id)
+    db["current_upload"][uid]["desc"] = message.text
+    save_db()
+    msg = bot.send_message(uid, "🖼 Cover Photo ပို့ပါ")
+    bot.register_next_step_handler(msg, get_cover)
+
+def get_cover(message):
+    uid = str(message.chat.id)
+    if message.content_type == "photo":
+        db["current_upload"][uid]["cover"] = message.photo[-1].file_id
+        db["current_upload"][uid]["parts"] = []
+        save_db()
+        msg = bot.send_message(uid, "📹 Video တွေ ပို့ပါ (/done ပြီးရင်)")
+        bot.register_next_step_handler(msg, get_videos)
+    else:
+        bot.send_message(uid, "⚠️ ဓာတ်ပုံပဲ ပို့ပါ")
+        bot.register_next_step_handler(message, get_cover)
+
+def get_videos(message):
+    uid = str(message.chat.id)
+
+    if message.text == "/done":
+        save_movie(uid)
+        return
+
+    if message.content_type in ["video", "document"]:
+        sent = bot.forward_message(MAIN_GROUP, message.chat.id, message.message_id)
+        db["current_upload"][uid]["parts"].append(sent.message_id)
+        save_db()
+        bot.send_message(uid, f"✅ Part {len(db['current_upload'][uid]['parts'])} OK")
+
+    bot.register_next_step_handler(message, get_videos)
+    # ================= SAVE MOVIE =================
+def save_movie(uid):
+    movie_id = f"MOV_{int(time.time())}"
+    data = db["current_upload"][uid]
+
+    db["movies"][movie_id] = {
+        "title": data["title"],
+        "desc": data["desc"],
+        "cover": data["cover"],
+        "parts": data["parts"]
+    }
+
+    del db["current_upload"][uid]
+    save_db()
+
+    bot.send_message(uid, f"🎉 Movie တင်ပြီးပါပြီ\nID: {movie_id}")
+
+# ================= SHOW MOVIES =================
+@bot.message_handler(func=lambda m: m.text == "🎥 Movies")
+def show_movies(message):
+    if not db["movies"]:
+        bot.send_message(message.chat.id, "Movie မရှိသေးပါ")
+        return
+
+    for mid, m in db["movies"].items():
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("▶ Watch", callback_data=f"watch_{mid}"))
+        bot.send_photo(
+            message.chat.id,
+            m["cover"],
+            caption=f"🎬 {m['title']}\n📝 {m['desc']}",
+            reply_markup=kb
+        )
+
+# ================= WATCH MOVIE =================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("watch_"))
+def watch_movie(call):
+    mid = call.data.replace("watch_", "")
+    movie = db["movies"].get(mid)
+
+    if movie:
+        bot.send_message(call.message.chat.id, f"▶ {movie['title']} ပို့နေပါတယ်...")
+        for pid in movie["parts"]:
+            bot.forward_message(call.message.chat.id, MAIN_GROUP, pid)
+            time.sleep(2)
+        bot.send_message(call.message.chat.id, "✅ ပြီးပါပြီ")
+        # ================= SEARCH =================
+@bot.message_handler(func=lambda m: m.text == "🔍 Search")
+def search_prompt(message):
+    msg = bot.send_message(message.chat.id, "🔍 Movie နာမည် ရိုက်ပါ")
+    bot.register_next_step_handler(msg, do_search)
+
+def do_search(message):
+    key = message.text.lower()
+    found = False
+    for mid, m in db["movies"].items():
+        if key in m["title"].lower():
+            found = True
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("▶ Watch", callback_data=f"watch_{mid}"))
+            bot.send_photo(message.chat.id, m["cover"], caption=m["title"], reply_markup=kb)
+    if not found:
+        bot.send_message(message.chat.id, "❌ မတွေ့ပါ")
+
+# ================= POINTS / VIP =================
+@bot.message_handler(func=lambda m: m.text == "⭐ My Points")
+def my_points(message):
+    user = db["users"].get(str(message.chat.id))
+    bot.send_message(message.chat.id, f"⭐ Points: {user['points']}")
+
+@bot.message_handler(func=lambda m: m.text == "💎 VIP")
+def vip(message):
+    bot.send_message(message.chat.id, "💎 VIP မဝယ်ရသေးပါ")
+
+# ================= BROADCAST =================
+@bot.message_handler(func=lambda m: m.text == "📢 Broadcast" and m.chat.id == OWNER_ID)
+def broadcast_prompt(message):
+    msg = bot.send_message(message.chat.id, "📢 Broadcast စာရေးပါ")
+    bot.register_next_step_handler(msg, do_broadcast)
+
+def do_broadcast(message):
+    for uid in db["users"]:
+        try:
+            bot.send_message(int(uid), message.text)
+        except:
+            pass
+    bot.send_message(message.chat.id, "✅ Broadcast Done")
+
+# ================= RUN =================
 bot.infinity_polling()
+    
