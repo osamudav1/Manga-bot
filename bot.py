@@ -1,6 +1,6 @@
 import json, asyncio, os
 from datetime import datetime
-from pyrogram import Client, filters, errors
+from pyrogram import Client, filters,
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from config import *
 
@@ -88,6 +88,90 @@ async def watch_movie(client, callback_query):
     await asyncio.sleep(60)
     await client.delete_messages(callback_query.from_user.id, all_sent)
     await client.send_message(callback_query.from_user.id, "⚠ Video removed due to copyright")
+    from datetime import timedelta
+
+@bot.on_callback_query(filters.regex("^exchange_vip_"))
+async def exchange_vip(client, callback_query):
+    user_id = str(callback_query.from_user.id)
+    plan = callback_query.data.split("_")[2] # 1, 3, သို့မဟုတ် 6
+    
+    db = load_db()
+    user = db["users"].get(user_id)
+    
+    # Point သတ်မှတ်ချက်များ
+    plans = {
+        "1": {"points": 250, "days": 30},
+        "3": {"points": 600, "days": 90},
+        "6": {"points": 1000, "days": 180}
+    }
+    
+    required_points = plans[plan]["points"]
+    duration_days = plans[plan]["days"]
+# --- REWARD ADS LOGIC ---
+@bot.on_callback_query(filters.regex("^watch_ad$"))
+async def watch_reward_ad(client, callback_query):
+    user_id = str(callback_query.from_user.id)
+    db = load_db()
+    user = db["users"].get(user_id)
+    
+    # နေ့စဉ် ၃ ကြိမ် ကန့်သတ်ချက် စစ်ဆေးခြင်း
+    today = str(datetime.now().date())
+    if user.get("last_ad_date") != today:
+        user["ad_count"] = 0
+        user["last_ad_date"] = today
+
+    if user.get("ad_count", 0) >= 3:
+        return await callback_query.answer("⚠️ ဒီနေ့အတွက် အကြိမ်ရေ ပြည့်သွားပါပြီ။", show_alert=True)
+# --- ADMIN ADS MANAGEMENT ---
+@bot.on_message(filters.command("setad") & filters.user(ADMIN_ID))
+async def set_ad(client, message):
+    try:
+        # ပုံစံ: /setad စာသား | Link
+        data = message.text.split(" ", 1)[1].split("|")
+        db = load_db()
+        db["settings"]["ad_banner"] = data[0].strip()
+        db["settings"]["ad_link"] = data[1].strip()
+        save_db(db)
+        await message.reply("✅ ကြော်ငြာအသစ်ကို အောင်မြင်စွာ ပြောင်းလဲပြီးပါပြီ။")
+    except:
+        await message.reply("⚠️ ပုံစံမှားနေပါတယ်။ `/setad စာသား | Link` ဟု ရိုက်ပါ။")
+
+    await callback_query.answer("ကြော်ငြာကို ၅ စက္ကန့်ကြည့်ပေးပါ။ Point ရပါလိမ့်မည်...", show_alert=False)
+    await asyncio.sleep(5) 
+    
+    user["points"] += 2 # တစ်ခါကြည့်ရင် 2 points ပေးမယ်
+    user["ad_count"] = user.get("ad_count", 0) + 1
+    save_db(db)
+    
+    await callback_query.message.reply_text("✅ ကြော်ငြာကြည့်ပြီးလို့ +2 Points ရရှိပါပြီ။")
+
+    if user["points"] < required_points:
+        return await callback_query.answer(f"⚠️ Point မလုံလောက်ပါ။ {required_points} points လိုအပ်ပါတယ်။", show_alert=True)
+    
+    # VIP Update လုပ်ခြင်း
+    user["points"] -= required_points
+    user["is_vip"] = True
+    
+    # ရက်စွဲတွက်ချက်ခြင်း
+    current_expiry = user.get("vip_expiry")
+    start_date = datetime.now()
+    
+    # အကယ်၍ VIP ဖြစ်နေဆဲဆိုရင် ရက်ထပ်ပေါင်းပေးမယ်
+    if current_expiry and datetime.strptime(current_expiry, "%Y-%m-%d") > start_date:
+        start_date = datetime.strptime(current_expiry, "%Y-%m-%d")
+        
+    expiry_date = start_date + timedelta(days=duration_days)
+    user["vip_expiry"] = expiry_date.strftime("%Y-%m-%d")
+    
+    save_db(db)
+    
+    await callback_query.message.edit_text(
+        f"🎉 VIP အောင်မြင်စွာလဲလှယ်ပြီးပါပြီ!\n\n"
+        f"🗓 သက်တမ်းကုန်ရက်: {user['vip_expiry']}\n"
+        f"💰 လက်ကျန် Point: {user['points']}",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="back_home")]])
+    )
+
     @bot.on_message(filters.command("admin") & filters.user(ADMIN_ID))
 async def admin_dashboard(client, message):
     btns = [
@@ -117,7 +201,7 @@ async def get_ref(client, callback_query):
 # Requirements.txt
 # pyrogram
 # tgcrypto
-
+/setad
 if __name__ == "__main__":
     bot.run()
 
