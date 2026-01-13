@@ -1,184 +1,124 @@
-import telebot
-import time
-import json
-import os
+import json, asyncio, os
+from datetime import datetime
+from pyrogram import Client, filters, errors
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
+from config import *
 
-from telebot import types
-from config import (
-    BOT_TOKEN,
-    OWNER_ID,
-    CHANNEL_ID,
-    BATCH_SIZE,
-    COOLDOWN
-)
-from buttons import main_menu
+bot = Client("MovieBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-bot = telebot.TeleBot(BOT_TOKEN)
+DB_FILE = "database.json"
 
-STATE_FILE = "state.json"
-CAPTIONS_FILE = "captions.json"
-EPISODES_FILE = "episodes.json"
-METADATA_FILE = "metadata.json"
+def load_db():
+    if not os.path.exists(DB_FILE):
+        return {"users": {}, "movies": [], "settings": {"is_force_join": True, "force_join_channel": ""}}
+    return json.load(open(DB_FILE, "r"))
 
-# ---------------- UTIL ----------------
+def save_db(data):
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-def load_json(file, default):
-    if not os.path.exists(file):
-        with open(file, "w") as f:
-            json.dump(default, f)
-    with open(file, "r") as f:
-        return json.load(f)
+# Force Join Checker
+async def check_fjoin(client, message):
+    db = load_db()
+    if not db["settings"]["is_force_join"]: return True
+    channel = db["settings"]["force_join_channel"].replace("@", "")
+    try:
+        await client.get_chat_member(channel, message.from_user.id)
+        return True
+    except:
+        btn = [[InlineKeyboardButton("🔔 Join Channel", url=f"https://t.me/{channel}")],
+               [InlineKeyboardButton("✅ Done", callback_data="check_start")]]
+        await message.reply("🚫 Access Restricted\nJoin our official channel first 👇", reply_markup=InlineKeyboardMarkup(btn))
+        return False
 
-def save_json(file, data):
-    with open(file, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+@bot.on_message(filters.command("start") & filters.private)
+async def start(client, message):
+    user_id = str(message.from_user.id)
+    db = load_db()
+    
+    # Register User
+    if user_id not in db["users"]:
+        db["users"][user_id] = {
+            "name": message.from_user.first_name, "points": 10, "is_vip": False,
+            "daily_watch_count": 0, "last_watch_date": str(datetime.now().date())
+        }
+        save_db(db)
 
-def owner_only(message):
-    return message.from_user.id == OWNER_ID
+    if not await check_fjoin(client, message): return
 
-# ---------------- STATE ----------------
+    buttons = [
+        [InlineKeyboardButton("🎥 Movies", callback_data="movies_main"), InlineKeyboardButton("🔍 Search", callback_data="search_main")],
+        [InlineKeyboardButton("⭐ My Points", callback_data="points_info"), InlineKeyboardButton("💎 VIP Upgrade", callback_data="vip_info")],
+        [InlineKeyboardButton("🔗 My Link", callback_data="ref_link"), InlineKeyboardButton("ℹ️ Help", callback_data="help_info")],
+        [InlineKeyboardButton("❌ Exit", callback_data="close_bot")]
+    ]
+    await message.reply(db["settings"]["welcome_msg"], reply_markup=InlineKeyboardMarkup(buttons))
+    @bot.on_callback_query(filters.regex("^watch_"))
+async def watch_movie(client, callback_query):
+    user_id = str(callback_query.from_user.id)
+    movie_id = int(callback_query.data.split("_")[1])
+    db = load_db()
+    user = db["users"][user_id]
 
-def get_state():
-    return load_json(STATE_FILE, {"mode": None})
+    # Access Control
+    today = str(datetime.now().date())
+    if user["last_watch_date"] != today:
+        user["daily_watch_count"] = 0
+        user["last_watch_date"] = today
 
-def set_state(mode):
-    save_json(STATE_FILE, {"mode": mode})
+    if not user["is_vip"] and user["daily_watch_count"] >= 5:
+        return await callback_query.message.reply("⚠ Daily free limit reached. Upgrade to VIP!")
 
-# ---------------- START ----------------
+    movie = db["movies"][movie_id]
+    user["daily_watch_count"] += 1
+    save_db(db)
 
-@bot.message_handler(commands=["start"])
-def start(message):
-    if not owner_only(message):
-        return
-    bot.send_message(
-        message.chat.id,
-        "Welcome Owner!",
-        reply_markup=main_menu()
-    )
+    await callback_query.answer("Processing your movie album...", show_alert=False)
+    
+    # Album Sequential Delivery
+    parts = movie["parts"]
+    all_sent = []
+    for i in range(0, len(parts), 10):
+        batch = parts[i:i+10]
+        media = [InputMediaVideo(p["file_id"]) for p in batch]
+        sent = await client.send_media_group(callback_query.from_user.id, media)
+        all_sent.extend([s.id for s in sent])
+    
+    # Auto-Delete Logic (1 Min)
+    await asyncio.sleep(60)
+    await client.delete_messages(callback_query.from_user.id, all_sent)
+    await client.send_message(callback_query.from_user.id, "⚠ Video removed due to copyright")
+    @bot.on_message(filters.command("admin") & filters.user(ADMIN_ID))
+async def admin_dashboard(client, message):
+    btns = [
+        [InlineKeyboardButton("👥 Users", callback_data="adm_users"), InlineKeyboardButton("🎬 Manage Movies", callback_data="adm_movies")],
+        [InlineKeyboardButton("🔐 Force Join Settings", callback_data="adm_fjoin")],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="adm_bc"), InlineKeyboardButton("⚙️ Settings", callback_data="adm_sets")]
+    ]
+    await message.reply("👑 Owner Dashboard", reply_markup=InlineKeyboardMarkup(btns))
 
-# ---------------- HELP ----------------
+@bot.on_callback_query(filters.regex("^adm_fjoin"))
+async def set_fjoin(client, callback_query):
+    db = load_db()
+    status = "Enabled" if db["settings"]["is_force_join"] else "Disabled"
+    btns = [
+        [InlineKeyboardButton(f"Status: {status}", callback_data="toggle_fj")],
+        [InlineKeyboardButton("✏️ Change Channel", callback_data="change_fj_ch")],
+        [InlineKeyboardButton("🔙 Back", callback_data="adm_home")]
+    ]
+    await callback_query.message.edit_text("Force Join Settings", reply_markup=InlineKeyboardMarkup(btns))
+# Points & Referral
+@bot.on_callback_query(filters.regex("ref_link"))
+async def get_ref(client, callback_query):
+    user_id = callback_query.from_user.id
+    link = f"https://t.me/{(await client.get_me()).username}?start={user_id}"
+    await callback_query.message.reply(f"Invite friends and earn 10 points!\nYour Link: {link}")
 
-@bot.message_handler(func=lambda m: m.text == "❓ Help")
-def help_cmd(message):
-    if not owner_only(message):
-        return
-    bot.send_message(
-        message.chat.id,
-        "🧩 Flow:\n"
-        "1️⃣ Edit Caption\n"
-        "2️⃣ Post Video\n"
-        "3️⃣ Send videos (max 100)\n"
-        "4️⃣ Bot auto posts with episode\n"
-    )
+# Requirements.txt
+# pyrogram
+# tgcrypto
 
-# ---------------- RESET ----------------
+if __name__ == "__main__":
+    bot.run()
 
-@bot.message_handler(func=lambda m: m.text == "⚙ Reset Titles")
-def reset_all(message):
-    if not owner_only(message):
-        return
 
-    save_json(CAPTIONS_FILE, {})
-    save_json(EPISODES_FILE, {})
-    save_json(METADATA_FILE, {})
-
-    bot.send_message(
-        message.chat.id,
-        "✅ All titles, captions cleared.\nEpisode reset to 1."
-    )
-
-# ---------------- EDIT CAPTION ----------------
-
-@bot.message_handler(func=lambda m: m.text == "📝 Edit Caption")
-def edit_caption(message):
-    if not owner_only(message):
-        return
-    set_state("WAIT_CAPTION")
-    bot.send_message(
-        message.chat.id,
-        "✏️ Send caption text now.\n(Title + Description)"
-    )
-
-@bot.message_handler(func=lambda m: get_state()["mode"] == "WAIT_CAPTION")
-def save_caption(message):
-    if not owner_only(message):
-        return
-
-    captions = load_json(CAPTIONS_FILE, {})
-    captions["current"] = message.text
-    save_json(CAPTIONS_FILE, captions)
-
-    # reset episode
-    episodes = load_json(EPISODES_FILE, {})
-    episodes["current"] = 1
-    save_json(EPISODES_FILE, episodes)
-
-    set_state(None)
-
-    bot.send_message(
-        message.chat.id,
-        "✅ Caption saved.\nEpisode reset to 1.",
-        reply_markup=main_menu()
-    )
-
-# ---------------- POST VIDEO ----------------
-
-@bot.message_handler(func=lambda m: m.text == "📺 Post Video")
-def post_video(message):
-    if not owner_only(message):
-        return
-    set_state("WAIT_VIDEO")
-    bot.send_message(
-        message.chat.id,
-        "📤 Send videos now (max 100).\nBot will auto post."
-    )
-
-# ---------------- VIDEO HANDLER ----------------
-
-@bot.message_handler(content_types=["video"])
-def handle_video(message):
-    if not owner_only(message):
-        return
-
-    state = get_state()
-    if state["mode"] != "WAIT_VIDEO":
-        return
-
-    captions = load_json(CAPTIONS_FILE, {})
-    episodes = load_json(EPISODES_FILE, {})
-
-    caption_text = captions.get("current", "No Caption")
-    ep = episodes.get("current", 1)
-
-    final_caption = f"{caption_text}\n\n📺 Episode {ep:02d}"
-
-    bot.send_video(
-        CHANNEL_ID,
-        message.video.file_id,
-        caption=final_caption
-    )
-
-    episodes["current"] = ep + 1
-    save_json(EPISODES_FILE, episodes)
-
-    # batch control
-    if ep % BATCH_SIZE == 0:
-        time.sleep(COOLDOWN)
-
-# ---------------- DONE COMMAND ----------------
-
-@bot.message_handler(commands=["done"])
-def done_posting(message):
-    if not owner_only(message):
-        return
-    set_state(None)
-    bot.send_message(
-        message.chat.id,
-        "✅ All videos posted successfully!",
-        reply_markup=main_menu()
-    )
-
-# ---------------- RUN ----------------
-
-print("Bot is running...")
-bot.infinity_polling()
