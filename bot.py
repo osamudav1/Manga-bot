@@ -1,138 +1,184 @@
-import os
-import json
+import telebot
 import time
-from telebot import TeleBot, types
-from config import *
+import json
+import os
+
+from telebot import types
+from config import (
+    BOT_TOKEN,
+    OWNER_ID,
+    CHANNEL_ID,
+    BATCH_SIZE,
+    COOLDOWN
+)
 from buttons import main_menu
 
-bot = TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# Load metadata
-if os.path.exists(METADATA_FILE):
-    with open(METADATA_FILE, "r") as f:
-        metadata = json.load(f)
-else:
-    metadata = {}
+STATE_FILE = "state.json"
+CAPTIONS_FILE = "captions.json"
+EPISODES_FILE = "episodes.json"
+METADATA_FILE = "metadata.json"
 
-# Load episodes
-if os.path.exists(EPISODE_FILE):
-    with open(EPISODE_FILE, "r") as f:
-        episodes = json.load(f)
-else:
-    episodes = {}
+# ---------------- UTIL ----------------
 
-# Load captions
-if os.path.exists(CAPTIONS_FILE):
-    with open(CAPTIONS_FILE, "r") as f:
-        captions = json.load(f)
-else:
-    captions = {}
+def load_json(file, default):
+    if not os.path.exists(file):
+        with open(file, "w") as f:
+            json.dump(default, f)
+    with open(file, "r") as f:
+        return json.load(f)
 
-# ----------------------------
-# Owner-only decorator
-# ----------------------------
-def owner_only(func):
-    def wrapper(message, *args, **kwargs):
-        if message.chat.id != OWNER_ID:
-            return
-        return func(message, *args, **kwargs)
-    return wrapper
+def save_json(file, data):
+    with open(file, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
-# ----------------------------
-# Start command
-# ----------------------------
-@bot.message_handler(commands=['start'])
-@owner_only
-def start_menu(msg):
-    bot.send_message(msg.chat.id, "Welcome Owner!", reply_markup=main_menu())
+def owner_only(message):
+    return message.from_user.id == OWNER_ID
 
-# ----------------------------
-# Reset Titles
-# ----------------------------
-@bot.message_handler(func=lambda m: m.text == "⚙ Reset Titles")
-@owner_only
-def reset_titles(msg):
-    global metadata, episodes, captions
-    metadata = {}
-    episodes = {}
-    captions = {}
-    # Save to files
-    with open(METADATA_FILE, "w") as f:
-        json.dump(metadata, f)
-    with open(EPISODE_FILE, "w") as f:
-        json.dump(episodes, f)
-    with open(CAPTIONS_FILE, "w") as f:
-        json.dump(captions, f)
-    bot.send_message(msg.chat.id, "✅ All titles, captions cleared. Episode counters reset to 1.\nNow you can add new titles.")
+# ---------------- STATE ----------------
 
-# ----------------------------
-# Edit Caption
-# ----------------------------
-@bot.message_handler(func=lambda m: m.text == "📝 Edit Caption")
-@owner_only
-def edit_caption(msg):
-    video_files = [f for f in os.listdir(VIDEO_FOLDER) if f.endswith(".mp4")]
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for f in video_files:
-        keyboard.add(f)
-    bot.send_message(msg.chat.id, "Select a title to edit caption:", reply_markup=keyboard)
+def get_state():
+    return load_json(STATE_FILE, {"mode": None})
 
-@bot.message_handler(func=lambda m: m.text.endswith(".mp4"))
-@owner_only
-def select_title(msg):
-    video = msg.text
-    title = os.path.splitext(video)[0]
-    current_caption = captions.get(video, metadata.get(title, "No description"))
-    episode_num = episodes.get(title, 0) + 1
-    bot.send_message(msg.chat.id,
-        f"Title: {title}\nCurrent Caption:\n{current_caption}\nEpisode: {episode_num}\n\nSend new caption text or /skip to keep default."
+def set_state(mode):
+    save_json(STATE_FILE, {"mode": mode})
+
+# ---------------- START ----------------
+
+@bot.message_handler(commands=["start"])
+def start(message):
+    if not owner_only(message):
+        return
+    bot.send_message(
+        message.chat.id,
+        "Welcome Owner!",
+        reply_markup=main_menu()
     )
-    bot.register_next_step_handler(msg, receive_caption, video)
 
-def receive_caption(msg, video):
-    title = os.path.splitext(video)[0]
-    if msg.text == "/skip":
-        captions[video] = metadata.get(title, "No description")
-    else:
-        captions[video] = msg.text
-    episodes[title] = episodes.get(title, 0) + 1
-    # Save files
-    with open(CAPTIONS_FILE, "w") as f:
-        json.dump(captions, f)
-    with open(EPISODE_FILE, "w") as f:
-        json.dump(episodes, f)
-    bot.send_message(msg.chat.id, f"✅ Caption set for {title} Episode {episodes[title]}")
+# ---------------- HELP ----------------
 
-# ----------------------------
-# Post Videos + Forward
-# ----------------------------
+@bot.message_handler(func=lambda m: m.text == "❓ Help")
+def help_cmd(message):
+    if not owner_only(message):
+        return
+    bot.send_message(
+        message.chat.id,
+        "🧩 Flow:\n"
+        "1️⃣ Edit Caption\n"
+        "2️⃣ Post Video\n"
+        "3️⃣ Send videos (max 100)\n"
+        "4️⃣ Bot auto posts with episode\n"
+    )
+
+# ---------------- RESET ----------------
+
+@bot.message_handler(func=lambda m: m.text == "⚙ Reset Titles")
+def reset_all(message):
+    if not owner_only(message):
+        return
+
+    save_json(CAPTIONS_FILE, {})
+    save_json(EPISODES_FILE, {})
+    save_json(METADATA_FILE, {})
+
+    bot.send_message(
+        message.chat.id,
+        "✅ All titles, captions cleared.\nEpisode reset to 1."
+    )
+
+# ---------------- EDIT CAPTION ----------------
+
+@bot.message_handler(func=lambda m: m.text == "📝 Edit Caption")
+def edit_caption(message):
+    if not owner_only(message):
+        return
+    set_state("WAIT_CAPTION")
+    bot.send_message(
+        message.chat.id,
+        "✏️ Send caption text now.\n(Title + Description)"
+    )
+
+@bot.message_handler(func=lambda m: get_state()["mode"] == "WAIT_CAPTION")
+def save_caption(message):
+    if not owner_only(message):
+        return
+
+    captions = load_json(CAPTIONS_FILE, {})
+    captions["current"] = message.text
+    save_json(CAPTIONS_FILE, captions)
+
+    # reset episode
+    episodes = load_json(EPISODES_FILE, {})
+    episodes["current"] = 1
+    save_json(EPISODES_FILE, episodes)
+
+    set_state(None)
+
+    bot.send_message(
+        message.chat.id,
+        "✅ Caption saved.\nEpisode reset to 1.",
+        reply_markup=main_menu()
+    )
+
+# ---------------- POST VIDEO ----------------
+
 @bot.message_handler(func=lambda m: m.text == "📺 Post Video")
-@owner_only
-def post_videos(msg):
-    video_files = [f for f in os.listdir(VIDEO_FOLDER) if f.endswith(".mp4")]
-    video_files.sort()
-    for i in range(0, len(video_files), BATCH_SIZE):
-        batch = video_files[i:i+BATCH_SIZE]
-        for v in batch:
-            title = os.path.splitext(v)[0]
-            description = captions.get(v, metadata.get(title, "No description"))
-            ep_num = episodes.get(title, 0)
-            caption_text = f"{description}\n📺 Episode {ep_num}"
+def post_video(message):
+    if not owner_only(message):
+        return
+    set_state("WAIT_VIDEO")
+    bot.send_message(
+        message.chat.id,
+        "📤 Send videos now (max 100).\nBot will auto post."
+    )
 
-            video_path = os.path.join(VIDEO_FOLDER, v)
+# ---------------- VIDEO HANDLER ----------------
 
-            # Post to source channel
-            with open(video_path, "rb") as vid:
-                msg_obj = bot.send_video(SOURCE_CHANNEL, vid, caption=caption_text)
+@bot.message_handler(content_types=["video"])
+def handle_video(message):
+    if not owner_only(message):
+        return
 
-            # Forward to target channel
-            bot.forward_message(TARGET_CHANNEL, SOURCE_CHANNEL, msg_obj.message_id)
+    state = get_state()
+    if state["mode"] != "WAIT_VIDEO":
+        return
 
-            print(f"✅ Posted & Forwarded {title} Episode {ep_num}")
-            time.sleep(COOLDOWN)
-    bot.send_message(msg.chat.id, "✅ All videos posted and forwarded successfully!")
+    captions = load_json(CAPTIONS_FILE, {})
+    episodes = load_json(EPISODES_FILE, {})
 
-# ----------------------------
-# Run Bot
-# ----------------------------
+    caption_text = captions.get("current", "No Caption")
+    ep = episodes.get("current", 1)
+
+    final_caption = f"{caption_text}\n\n📺 Episode {ep:02d}"
+
+    bot.send_video(
+        CHANNEL_ID,
+        message.video.file_id,
+        caption=final_caption
+    )
+
+    episodes["current"] = ep + 1
+    save_json(EPISODES_FILE, episodes)
+
+    # batch control
+    if ep % BATCH_SIZE == 0:
+        time.sleep(COOLDOWN)
+
+# ---------------- DONE COMMAND ----------------
+
+@bot.message_handler(commands=["done"])
+def done_posting(message):
+    if not owner_only(message):
+        return
+    set_state(None)
+    bot.send_message(
+        message.chat.id,
+        "✅ All videos posted successfully!",
+        reply_markup=main_menu()
+    )
+
+# ---------------- RUN ----------------
+
+print("Bot is running...")
 bot.infinity_polling()
