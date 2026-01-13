@@ -1,157 +1,147 @@
+# config.py
+API_ID = 19703932# သင့် API ID
+API_HASH = "2fe31e84e0b537b505f528e62e114664" # သင့် API Hash
+BOT_TOKEN = "7292122932:AAG8hCvjbcF-MuM9IUxivPUGyF-MvdW84HQ" # သင့် Bot Token
+ADMIN_ID = 1735522859 # သင့် User ID (Owner)
+MAIN_GROUP =   -1002849045181 # ရုပ်ရှင်ရှိသော Group ID
+BACKUP_GROUP = -1003502685671
+... # Backup Group ID
 import json, asyncio, os
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import UserNotParticipant
 from config import *
 
-bot = Client("MovieBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
+bot = Client("SeaTvBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 DB_FILE = "database.json"
 
-# --- DATABASE LOGIC ---
 def load_db():
     if not os.path.exists(DB_FILE):
-        data = {
-            "users": {}, 
-            "movies": [], 
-            "settings": {
-                "is_force_join": False, 
-                "force_join_channel": "",
-                "welcome_msg": "Welcome to SeaTv-MM Bot!",
-                "ad_banner": "Join our channel",
-                "ad_link": "https://t.me/seatvmm"
-            }
-        }
-        with open(DB_FILE, "w") as f:
-            json.dump(data, f, indent=4)
-        return data
+        return {"users": {}, "movies": [], "settings": {"force_join": True, "force_channel": "@seatvmm"}}
     return json.load(open(DB_FILE, "r"))
 
 def save_db(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    json.dump(data, open(DB_FILE, "w"), indent=4)
 
-# --- 1. START & MAIN MENU ---
+async def check_force_join(client, user_id):
+    db = load_db()
+    if not db["settings"]["force_join"]: return True
+    try:
+        await client.get_chat_member(db["settings"]["force_channel"], user_id)
+        return True
+    except UserNotParticipant: return False
+    except: return True
+
 @bot.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     user_id = str(message.from_user.id)
     db = load_db()
     
+    # User Registration & Approval Check
     if user_id not in db["users"]:
         db["users"][user_id] = {
             "name": message.from_user.first_name, "points": 10, "is_vip": False,
-            "daily_watch_count": 0, "last_watch_date": str(datetime.now().date()),
-            "vip_expiry": None
+            "vip_expiry": None, "is_approved": True, "daily_watch_count": 0,
+            "last_watch_date": str(datetime.now().date())
         }
         save_db(db)
 
-    buttons = [
-        [InlineKeyboardButton("🎥 Movies", callback_data="movies_main"), InlineKeyboardButton("🔍 Search", callback_data="search_main")],
+    if not await check_force_join(client, message.from_user.id):
+        btn = [[InlineKeyboardButton("🔔 Join Channel", url=f"https://t.me/seatvmm")],
+               [InlineKeyboardButton("✅ Done", callback_data="check_join")]]
+        return await message.reply("🚫 Access Restricted\nJoin our official channel first 👇", reply_markup=InlineKeyboardMarkup(btn))
+
+    # Main Menu Buttons
+    btns = [
+        [InlineKeyboardButton("🎥 Movies", callback_data="movies_list"), InlineKeyboardButton("🔍 Search", callback_data="search_mode")],
         [InlineKeyboardButton("⭐ My Points", callback_data="points_info"), InlineKeyboardButton("💎 VIP Upgrade", callback_data="vip_info")],
         [InlineKeyboardButton("🔗 My Link", callback_data="ref_link"), InlineKeyboardButton("ℹ️ Help", callback_data="help_info")],
-        [InlineKeyboardButton(f"📢 {db['settings']['ad_banner']}", url=db['settings']['ad_link'])],
-        [InlineKeyboardButton("🎁 Watch Ad (+2 Pts)", callback_data="watch_ad")]
+        [InlineKeyboardButton("❌ Exit", callback_data="close_bot")]
     ]
-    await message.reply(db["settings"]["welcome_msg"], reply_markup=InlineKeyboardMarkup(buttons))
-
-# --- 2. MOVIE & WATCH LOGIC ---
-@bot.on_callback_query(filters.regex("^movies_main"))
-async def movies_list(client, callback_query):
+    if int(user_id) == ADMIN_ID:
+        btns.insert(0, [InlineKeyboardButton("👑 Owner Dashboard", callback_data="owner_main")])
+        
+    await message.reply("📺 **SeaTv-MM Main Menu**", reply_markup=InlineKeyboardMarkup(btns))
+# --- MOVIE ACCESS CONTROL ---
+@bot.on_callback_query(filters.regex("^get_movie_"))
+async def deliver_movie(client, cb):
+    movie_id = cb.data.split("_")[2]
+    user_id = str(cb.from_user.id)
     db = load_db()
-    if not db["movies"]:
-        return await callback_query.answer("No movies available yet!", show_alert=True)
-    await callback_query.message.edit_text("Select a movie to watch:")
-
-@bot.on_callback_query(filters.regex("^watch_ad$"))
-async def watch_reward_ad(client, callback_query):
-    user_id = str(callback_query.from_user.id)
-    db = load_db()
-    user = db["users"].get(user_id)
+    user = db["users"][user_id]
     today = str(datetime.now().date())
-    
-    if user.get("last_ad_date") != today:
-        user["ad_count"] = 0
-        user["last_ad_date"] = today
 
-    if user.get("ad_count", 0) >= 3:
-        return await callback_query.answer("⚠️ Limit 3 times per day!", show_alert=True)
+    # Limit Check
+    if user["last_watch_date"] != today:
+        user["daily_watch_count"] = 0
+        user["last_watch_date"] = today
 
-    await callback_query.answer("Watching ad (5s)...", show_alert=False)
-    await asyncio.sleep(5)
-    user["points"] += 2
-    user["ad_count"] = user.get("ad_count", 0) + 1
+    if not user["is_vip"] and user["daily_watch_count"] >= 5:
+        return await cb.message.reply("⚠ Daily free limit reached. Upgrade to VIP", 
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Upgrade to VIP", callback_data="vip_info")]]))
+
+    # Sequential Forwarding
+    movie = next((m for m in db["movies"] if m["movie_id"] == movie_id), None)
+    if not movie: return await cb.answer("Movie not found!")
+
+    user["daily_watch_count"] += 1
     save_db(db)
-    await callback_query.message.reply_text("✅ +2 Points Added!")
-
-# --- 3. POINTS & REFERRAL ---
-@bot.on_callback_query(filters.regex("points_info"))
-async def points_info(client, callback_query):
-    db = load_db()
-    user = db["users"].get(str(callback_query.from_user.id))
-    status = "VIP 💎" if user["is_vip"] else "Free User"
-    await callback_query.answer(f"Status: {status}\nPoints: {user['points']}", show_alert=True)
-
-@bot.on_callback_query(filters.regex("ref_link"))
-async def get_ref(client, callback_query):
-    username = (await client.get_me()).username
-    link = f"https://t.me/{username}?start={callback_query.from_user.id}"
-    await callback_query.message.reply(f"Invite friends & earn 10 points!\nYour Link: {link}")
-
-# --- 4. VIP SYSTEM ---
-@bot.on_callback_query(filters.regex("vip_info"))
-async def vip_menu(client, callback_query):
-    text = "💎 **VIP Plans**\n1 Month: 250 Pts\n3 Months: 600 Pts"
-    btns = [[InlineKeyboardButton("1 Month (250 pts)", callback_data="exchange_vip_1")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_home")]]
-    await callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(btns))
-
-@bot.on_callback_query(filters.regex("^exchange_vip_"))
-async def exchange_vip(client, callback_query):
-    user_id = str(callback_query.from_user.id)
-    plan = callback_query.data.split("_")[2]
-    db = load_db()
-    user = db["users"].get(user_id)
     
-    cost = 250 if plan == "1" else 600
-    if user["points"] < cost:
-        return await callback_query.answer("Need more points!", show_alert=True)
-    
-    user["points"] -= cost
-    user["is_vip"] = True
-    expiry = datetime.now() + timedelta(days=30 if plan == "1" else 90)
-    user["vip_expiry"] = expiry.strftime("%Y-%m-%d")
-    save_db(db)
-    await callback_query.message.edit_text(f"🎉 VIP Active until {user['vip_expiry']}")
+    sent_msgs = []
+    for part in movie["parts"]:
+        try:
+            # Try Main Group first, then Backup
+            msg = await client.forward_messages(cb.from_user.id, MAIN_GROUP, part["message_id"])
+        except:
+            msg = await client.forward_messages(cb.from_user.id, BACKUP_GROUP, part["message_id"])
+        
+        sent_msgs.append(msg.id)
+        await asyncio.sleep(2) # Cooldown
 
-# --- 5. ADMIN & AD MANAGEMENT ---
-@bot.on_message(filters.command("admin") & filters.user(ADMIN_ID))
-async def admin_panel(client, message):
-    btns = [[InlineKeyboardButton("📊 Stats", callback_data="adm_stats")],
-            [InlineKeyboardButton("⚙️ Settings", callback_data="adm_sets")]]
-    await message.reply("👑 Admin Panel", reply_markup=InlineKeyboardMarkup(btns))
+    # Auto Delete Logic
+    await asyncio.sleep(60) # 1 Minute
+    for mid in sent_msgs:
+        try: await client.delete_messages(cb.from_user.id, mid)
+        except: pass
+    await client.send_message(cb.from_user.id, "⚠ Video removed due to copyright")
+# --- OWNER DASHBOARD ---
+@bot.on_callback_query(filters.regex("owner_main"))
+async def owner_dashboard(client, cb):
+    btns = [
+        [InlineKeyboardButton("👥 Users", callback_data="adm_users"), InlineKeyboardButton("🎬 Manage Movies", callback_data="adm_movies")],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="adm_bc"), InlineKeyboardButton("⚙️ Settings", callback_data="adm_sets")],
+        [InlineKeyboardButton("🔙 Back", callback_data="back_home")]
+    ]
+    await cb.message.edit_text("👑 **Owner Dashboard**", reply_markup=InlineKeyboardMarkup(btns))
 
-@bot.on_message(filters.command("setad") & filters.user(ADMIN_ID))
-async def set_ad(client, message):
+@bot.on_message(filters.command("addmovie") & filters.user(ADMIN_ID))
+async def owner_add_movie(client, message):
+    # Format: /addmovie ID | Title | Desc | Parts(msg_ids)
+    # Example: /addmovie JW01 | John Wick | Action | 123,124
     try:
-        data = message.text.split(" ", 1)[1].split("|")
+        data = message.text.split("|")
+        m_id = data[0].split()[1].strip()
+        title = data[1].strip()
+        desc = data[2].strip()
+        parts = [{"message_id": int(i.strip()), "group_id": "MAIN_GROUP"} for i in data[3].split(",")]
+        
         db = load_db()
-        db["settings"]["ad_banner"] = data[0].strip()
-        db["settings"]["ad_link"] = data[1].strip()
+        db["movies"].append({
+            "movie_id": m_id, "title": title, "description": desc,
+            "parts": parts, "total_parts": len(parts)
+        })
         save_db(db)
-        await message.reply("✅ Ad Updated Successfully!")
+        await message.reply(f"✅ Movie '{title}' Added Successfully!")
     except:
-        await message.reply("Format: /setad Text | Link")
+        await message.reply("❌ Use Format: `/addmovie ID | Title | Desc | PartID1,PartID2`")
 
-# --- 6. HELP & CLOSE ---
-@bot.on_callback_query(filters.regex("help_info"))
-async def help_info(client, callback_query):
-    await callback_query.answer("Contact @Admin for help.", show_alert=True)
+# --- POINT & VIP ---
+@bot.on_callback_query(filters.regex("points_info"))
+async def show_pts(client, cb):
+    db = load_db()
+    pts = db["users"][str(cb.from_user.id)]["points"]
+    await cb.answer(f"⭐ Your Points: {pts}", show_alert=True)
 
-@bot.on_callback_query(filters.regex("back_home"))
-async def back_home(client, callback_query):
-    await start(client, callback_query.message)
-
-# --- 7. START BOT ---
 if __name__ == "__main__":
-    print("Bot is running...")
     bot.run()
