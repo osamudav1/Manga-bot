@@ -11,7 +11,6 @@ DB_FILE = "database.json"
 # --- DATABASE LOGIC ---
 def load_db():
     if not os.path.exists(DB_FILE):
-        # ဖိုင်မရှိရင် default အနေနဲ့ ဒါတွေ အရင်ထည့်မယ်
         data = {
             "users": {}, 
             "movies": [], 
@@ -61,7 +60,6 @@ async def movies_list(client, callback_query):
     db = load_db()
     if not db["movies"]:
         return await callback_query.answer("No movies available yet!", show_alert=True)
-    # Simple list for example
     await callback_query.message.edit_text("Select a movie to watch:")
 
 @bot.on_callback_query(filters.regex("^watch_ad$"))
