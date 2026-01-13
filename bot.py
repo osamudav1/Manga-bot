@@ -11,17 +11,21 @@ DB_FILE = "database.json"
 # --- DATABASE LOGIC ---
 def load_db():
     if not os.path.exists(DB_FILE):
-        return {
+        # ဖိုင်မရှိရင် default အနေနဲ့ ဒါတွေ အရင်ထည့်မယ်
+        data = {
             "users": {}, 
             "movies": [], 
             "settings": {
                 "is_force_join": False, 
-                "force_join_channel": "", 
-                "welcome_msg": "Welcome to Movie Bot!",
-                "ad_banner": "Join our VIP channel",
-                "ad_link": "https://t.me/your_link"
+                "force_join_channel": "",
+                "welcome_msg": "Welcome to SeaTv-MM Bot!",
+                "ad_banner": "Join our channel",
+                "ad_link": "https://t.me/seatvmm"
             }
         }
+        with open(DB_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+        return data
     return json.load(open(DB_FILE, "r"))
 
 def save_db(data):
